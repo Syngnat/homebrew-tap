@@ -61,4 +61,3 @@ The Cask may be merged only after:
 3. The DMG is signed, notarized, stapled, and validated.
 4. `codesign --verify`, `spctl --assess`, and a clean Homebrew install succeed
    without removing or bypassing macOS quarantine.
-
