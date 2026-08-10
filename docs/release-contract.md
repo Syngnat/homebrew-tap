@@ -61,3 +61,10 @@ The Cask may be merged only after:
 3. The DMG is signed, notarized, stapled, and validated.
 4. `codesign --verify`, `spctl --assess`, and a clean Homebrew install succeed
    without removing or bypassing macOS quarantine.
+
+Run `script/stage-gonavi-release formula VERSION` and
+`GONAVI_APPLE_TEAM_ID=TEAMID script/stage-gonavi-release cask VERSION` to
+enforce these gates before the package definitions are created. Formula and
+Cask publication are independent:
+the Formula does not wait for Apple credentials, while the Cask remains absent
+from the default branch until its signed and notarized assets pass validation.

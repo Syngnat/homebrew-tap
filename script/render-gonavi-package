@@ -1,0 +1,86 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+
+MODE, VERSION, *CHECKSUMS = ARGV
+TAP_ROOT = File.expand_path(ENV.fetch("GONAVI_TAP_ROOT", ".."), __dir__).freeze
+
+def abort_usage
+  warn <<~USAGE
+    Usage:
+      script/render-gonavi-package formula VERSION SOURCE_SHA256
+      script/render-gonavi-package cask VERSION AMD64_DMG_SHA256 ARM64_DMG_SHA256
+  USAGE
+  exit 2
+end
+
+def valid_checksum?(value)
+  value&.match?(/\A[0-9a-f]{64}\z/)
+end
+
+abort_usage unless %w[formula cask].include?(MODE)
+abort "VERSION must be a stable x.y.z release" unless VERSION&.match?(/\A\d+\.\d+\.\d+\z/)
+
+case MODE
+when "formula"
+  valid_arguments = CHECKSUMS.length == 1 && valid_checksum?(CHECKSUMS[0])
+  abort_usage unless valid_arguments
+
+  destination = File.join(TAP_ROOT, "Formula", "gonavi.rb")
+  content = <<~RUBY
+    class Gonavi < Formula
+      desc "Headless database CLI using GoNavi connections and policy controls"
+      homepage "https://gonavi.org/"
+      url "https://github.com/Syngnat/GoNavi/archive/refs/tags/v#{VERSION}.tar.gz"
+      sha256 "#{CHECKSUMS[0]}"
+      license "Apache-2.0"
+
+      depends_on "go" => :build
+
+      def install
+        ENV["CGO_ENABLED"] = "0"
+        ldflags = "-X GoNavi-Wails/internal/cli.Version=\#{version}"
+        system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/gonavi"
+      end
+
+      test do
+        assert_match %Q("version":"\#{version}"), shell_output("\#{bin}/gonavi version")
+
+        ENV["GONAVI_DATA_ROOT"] = (testpath/"data").to_s
+        system bin/"gonavi", "list-connections"
+      end
+    end
+  RUBY
+when "cask"
+  valid_arguments = CHECKSUMS.length == 2 && CHECKSUMS.all? { |checksum| valid_checksum?(checksum) }
+  abort_usage unless valid_arguments
+
+  destination = File.join(TAP_ROOT, "Casks", "gonavi-app.rb")
+  content = <<~RUBY
+    cask "gonavi-app" do
+      arch arm: "Arm64", intel: "Amd64"
+
+      version "#{VERSION}"
+      sha256 arm:   "#{CHECKSUMS[1]}",
+             intel: "#{CHECKSUMS[0]}"
+
+      url "https://github.com/Syngnat/GoNavi/releases/download/v\#{version}/GoNavi-\#{version}-MacOS-\#{arch}.dmg",
+          verified: "github.com/Syngnat/GoNavi/"
+      name "GoNavi"
+      desc "Cross-platform database management application"
+      homepage "https://gonavi.org/"
+
+      auto_updates true
+      depends_on :macos
+
+      app "GoNavi.app"
+
+      uninstall quit: "com.wails.GoNavi"
+    end
+  RUBY
+end
+
+FileUtils.mkdir_p(File.dirname(destination))
+File.write(destination, content)
+puts destination

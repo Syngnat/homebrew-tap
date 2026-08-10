@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: script/stage-gonavi-release formula|cask VERSION
+
+The command writes Formula/gonavi.rb and/or Casks/gonavi-app.rb only after the
+corresponding immutable release artifacts pass their publication gates.
+USAGE
+  exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+
+stage_mode=$1
+release_version=$2
+[[ "$stage_mode" == "formula" || "$stage_mode" == "cask" ]] || usage
+[[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  echo "VERSION must be a stable x.y.z release" >&2
+  exit 2
+}
+
+tap_root=$(cd "$(dirname "$0")/.." && pwd)
+stage_root=$(mktemp -d "${TMPDIR:-/tmp}/gonavi-homebrew.XXXXXX")
+active_mount=""
+
+cleanup() {
+  if [[ -n "$active_mount" && -d "$active_mount" ]]; then
+    hdiutil detach "$active_mount" >/dev/null 2>&1 || true
+  fi
+  case "$stage_root" in
+    "${TMPDIR:-/tmp}"/gonavi-homebrew.*) rm -rf "$stage_root" ;;
+  esac
+}
+trap cleanup EXIT
+
+download() {
+  local url=$1
+  local destination=$2
+  curl --fail --location --proto '=https' --tlsv1.2 \
+    --retry 3 --output "$destination" "$url"
+}
+
+checksum() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+require_signature_property() {
+  local details=$1
+  local pattern=$2
+  local description=$3
+  if ! grep -Eq "$pattern" <<<"$details"; then
+    echo "Missing $description" >&2
+    return 1
+  fi
+}
+
+stage_formula() {
+  local source_archive="$stage_root/GoNavi-v${release_version}.tar.gz"
+  local source_dir="$stage_root/source"
+  local test_binary="$stage_root/gonavi"
+  local source_url="https://github.com/Syngnat/GoNavi/archive/refs/tags/v${release_version}.tar.gz"
+
+  download "$source_url" "$source_archive"
+  mkdir -p "$source_dir"
+  tar -xzf "$source_archive" -C "$source_dir"
+
+  local source_roots=("$source_dir"/*)
+  [[ ${#source_roots[@]} -eq 1 && -d "${source_roots[0]}" ]] || {
+    echo "Unexpected source archive layout" >&2
+    return 1
+  }
+  [[ -f "${source_roots[0]}/cmd/gonavi/main.go" && -d "${source_roots[0]}/internal/cli" ]] || {
+    echo "The source tag does not contain cmd/gonavi and internal/cli" >&2
+    return 1
+  }
+
+  (
+    cd "${source_roots[0]}"
+    CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X GoNavi-Wails/internal/cli.Version=${release_version}" \
+      -o "$test_binary" ./cmd/gonavi
+  )
+
+  [[ "$("$test_binary" version)" == "{\"version\":\"${release_version}\"}" ]] || {
+    echo "The staged CLI did not report the release version" >&2
+    return 1
+  }
+  GONAVI_DATA_ROOT="$stage_root/data" "$test_binary" list-connections >/dev/null
+
+  "$tap_root/script/render-gonavi-package" formula "$release_version" "$(checksum "$source_archive")"
+}
+
+verify_dmg() {
+  local architecture=$1
+  local dmg=$2
+  local mount_point="$stage_root/mount-${architecture}"
+  local dmg_details
+  local app_details
+  local bundle_short_version
+  local bundle_build_version
+  local executable_name
+  local expected_architecture
+
+  codesign --verify --verbose=2 "$dmg"
+  dmg_details=$(codesign --display --verbose=4 "$dmg" 2>&1)
+  require_signature_property "$dmg_details" '^Authority=Developer ID Application:' "Developer ID DMG signature"
+  require_signature_property "$dmg_details" "^TeamIdentifier=${apple_team_id}$" "expected DMG TeamIdentifier"
+  require_signature_property "$dmg_details" '^Timestamp=' "secure DMG timestamp"
+  xcrun stapler validate "$dmg"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+
+  mkdir -p "$mount_point"
+  hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+  active_mount=$mount_point
+
+  local app="$mount_point/GoNavi.app"
+  [[ -d "$app" ]] || {
+    echo "$dmg does not contain GoNavi.app" >&2
+    return 1
+  }
+  codesign --verify --deep --strict --verbose=2 "$app"
+  app_details=$(codesign --display --verbose=4 "$app" 2>&1)
+  require_signature_property "$app_details" '^Authority=Developer ID Application:' "Developer ID application signature"
+  require_signature_property "$app_details" "^TeamIdentifier=${apple_team_id}$" "expected application TeamIdentifier"
+  require_signature_property "$app_details" '^Timestamp=' "secure application timestamp"
+  require_signature_property "$app_details" '^CodeDirectory .*flags=.*\(runtime\)' "hardened runtime"
+  spctl --assess --type exec --verbose=2 "$app"
+
+  bundle_short_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+  bundle_build_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")
+  [[ "$bundle_short_version" == "$release_version" && "$bundle_build_version" == "$release_version" ]] || {
+    echo "$app has bundle versions $bundle_short_version/$bundle_build_version, expected $release_version" >&2
+    return 1
+  }
+
+  executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+  case "$architecture" in
+    amd64) expected_architecture=x86_64 ;;
+    arm64) expected_architecture=arm64 ;;
+  esac
+  lipo -verify_arch "$expected_architecture" "$app/Contents/MacOS/$executable_name"
+
+  hdiutil detach "$mount_point" >/dev/null
+  active_mount=""
+}
+
+stage_cask() {
+  [[ "$(uname -s)" == "Darwin" ]] || {
+    echo "Cask signing and notarization gates require macOS" >&2
+    return 1
+  }
+  apple_team_id=${GONAVI_APPLE_TEAM_ID:-}
+  [[ "$apple_team_id" =~ ^[A-Z0-9]{10}$ ]] || {
+    echo "GONAVI_APPLE_TEAM_ID must contain the expected 10-character Apple team ID" >&2
+    return 1
+  }
+
+  local amd64_dmg="$stage_root/GoNavi-${release_version}-MacOS-Amd64.dmg"
+  local arm64_dmg="$stage_root/GoNavi-${release_version}-MacOS-Arm64.dmg"
+  local release_url="https://github.com/Syngnat/GoNavi/releases/download/v${release_version}"
+
+  download "$release_url/$(basename "$amd64_dmg")" "$amd64_dmg"
+  download "$release_url/$(basename "$arm64_dmg")" "$arm64_dmg"
+  verify_dmg amd64 "$amd64_dmg"
+  verify_dmg arm64 "$arm64_dmg"
+
+  "$tap_root/script/render-gonavi-package" cask "$release_version" \
+    "$(checksum "$amd64_dmg")" "$(checksum "$arm64_dmg")"
+}
+
+case "$stage_mode" in
+  formula) stage_formula ;;
+  cask) stage_cask ;;
+esac

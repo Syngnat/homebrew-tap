@@ -21,3 +21,22 @@ brew install --cask Syngnat/tap/gonavi-app
 
 See [docs/release-contract.md](docs/release-contract.md) for the package and
 asset contracts.
+
+## Maintainer staging
+
+Package definitions are generated only after their release gates pass:
+
+```sh
+script/stage-gonavi-release formula 0.9.3
+GONAVI_APPLE_TEAM_ID=ABCDE12345 script/stage-gonavi-release cask 0.9.3
+```
+
+The Formula command downloads the immutable source tag, builds `./cmd/gonavi`
+with `CGO_ENABLED=0`, verifies its version and an offline command, and then
+writes `Formula/gonavi.rb`. The Cask command verifies both DMGs with codesign,
+Gatekeeper, and stapler before writing `Casks/gonavi-app.rb`.
+`GONAVI_APPLE_TEAM_ID` pins both DMGs and both apps to the expected signing
+identity instead of accepting an arbitrary Developer ID certificate.
+
+The generated files must still pass the tap's macOS and Linux `brew test-bot`
+checks in a pull request before they are merged into `main`.

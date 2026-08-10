@@ -41,9 +41,26 @@ jobs:
 
       - run: brew test-bot --only-setup
 
+      - name: Test GoNavi package staging
+        run: |
+          ruby test/render_gonavi_package_test.rb
+          bash -n script/stage-gonavi-release
+
       - run: brew test-bot --only-tap-syntax
       - run: brew test-bot --only-formulae
         if: github.event_name == 'pull_request'
+
+      - name: Verify GoNavi Cask installation
+        if: github.event_name == 'pull_request' && runner.os == 'macOS' && hashFiles('Casks/gonavi-app.rb') != ''
+        run: |
+          mkdir -p "$HOME/.gonavi"
+          touch "$HOME/.gonavi/homebrew-preservation-check"
+          brew trust --cask Syngnat/tap/gonavi-app
+          brew install --cask Syngnat/tap/gonavi-app
+          codesign --verify --deep --strict --verbose=2 /Applications/GoNavi.app
+          spctl --assess --type exec --verbose=2 /Applications/GoNavi.app
+          brew uninstall --cask Syngnat/tap/gonavi-app
+          test -f "$HOME/.gonavi/homebrew-preservation-check"
 
       - name: Upload bottles as artifact
         if: always() && github.event_name == 'pull_request'
