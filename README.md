@@ -1,18 +1,23 @@
-# Syngnat Tap
+# GoNavi Homebrew Tap
 
-## How do I install these formulae?
+Homebrew packages for [GoNavi](https://gonavi.org/).
 
-`brew install syngnat/tap/<formula>`
+The tap is being prepared for two packages:
 
-Or `brew tap syngnat/tap` and then `brew install <formula>`.
+- `gonavi`: the headless CLI, installed as a Formula.
+- `gonavi-app`: the macOS desktop application, installed as a Cask.
 
-Or, in a `brew bundle` `Brewfile`:
+The packages are not published on the default branch yet. The Formula waits for
+the first immutable source tag containing `cmd/gonavi`; the Cask waits for a
+Developer ID-signed and notarized DMG. This prevents Homebrew from exposing a
+package that cannot build or pass Gatekeeper.
 
-```ruby
-tap "syngnat/tap"
-brew "<formula>"
+Once those release gates are satisfied, installation will be:
+
+```sh
+brew install Syngnat/tap/gonavi
+brew install --cask Syngnat/tap/gonavi-app
 ```
 
-## Documentation
-
-`brew help`, `man brew` or check [Homebrew's documentation](https://docs.brew.sh).
+See [docs/release-contract.md](docs/release-contract.md) for the package and
+asset contracts.
