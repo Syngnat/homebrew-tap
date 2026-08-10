@@ -43,7 +43,7 @@ jobs:
 
       - name: Test GoNavi package staging
         run: |
-          ruby test/render_gonavi_package_test.rb
+          brew ruby test/render_gonavi_package_test.rb
           bash -n script/stage-gonavi-release
 
       - run: brew test-bot --only-tap-syntax
